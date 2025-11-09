@@ -1,0 +1,389 @@
+// Prisma Schema for MrPi Intelligence Hub
+// 包含完整的用户、工作区、订阅、采集、Zotero、语料库、向量等模型
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector]
+}
+
+// ============================================
+// 1. 用户 & 工作区
+// ============================================
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Relations
+  ownedWorkspaces Workspace[]   @relation("WorkspaceOwner")
+  memberships     Membership[]
+  entitlements    Entitlement[]
+  capturedItems   CapturedItem[]
+  ideas           Idea[]
+  tasksCreated    Task[]         @relation("TaskCreatedBy")
+  reports         Report[]       @relation("ReportCreatedBy")
+
+  @@index([email])
+}
+
+model Workspace {
+  id        String   @id @default(cuid())
+  name      String
+  ownerId   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  owner            User              @relation("WorkspaceOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  memberships      Membership[]
+  entitlements     Entitlement[]
+  capturedItems    CapturedItem[]
+  zoteroAccounts   ZoteroAccount[]
+  corpora          Corpus[]
+  corpusDocuments  CorpusDocument[]
+  ideas            Idea[]
+  tasks            Task[]
+  reports          Report[]
+
+  @@index([ownerId])
+}
+
+// ============================================
+// 2. 成员关系
+// ============================================
+
+enum WorkspaceRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+model Membership {
+  id          String        @id @default(cuid())
+  userId      String
+  workspaceId String
+  role        WorkspaceRole @default(MEMBER)
+  createdAt   DateTime      @default(now())
+
+  // Relations
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, workspaceId])
+  @@index([userId])
+  @@index([workspaceId])
+}
+
+// ============================================
+// 3. 订阅与权限（Entitlement）
+// ============================================
+
+enum PlanCode {
+  FREE
+  PRO_MONTHLY
+  PLUS_MONTHLY
+  EBOOK_ONLY
+}
+
+enum EntitlementSource {
+  GUMROAD
+  SHOPIFY
+  WECHAT
+  MANUAL
+}
+
+enum EntitlementStatus {
+  ACTIVE
+  INACTIVE
+}
+
+model Entitlement {
+  id          String             @id @default(cuid())
+  userId      String?
+  workspaceId String?
+  planCode    PlanCode
+  source      EntitlementSource
+  status      EntitlementStatus  @default(ACTIVE)
+  startedAt   DateTime           @default(now())
+  expiresAt   DateTime?
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  // Relations
+  user      User?      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace Workspace? @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([workspaceId])
+  @@index([status])
+}
+
+// ============================================
+// 4. CapturedItem（Chrome 插件 / Web App）
+// ============================================
+
+enum CapturedSource {
+  CHROME_EXTENSION
+  WEB_APP
+}
+
+model CapturedItem {
+  id          String          @id @default(cuid())
+  workspaceId String
+  userId      String
+  url         String
+  title       String
+  note        String?         @db.Text
+  tags        Json?
+  source      CapturedSource
+  createdAt   DateTime        @default(now())
+
+  // Relations
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+  @@index([userId])
+  @@index([createdAt])
+}
+
+// ============================================
+// 5. Zotero 集成
+// ============================================
+
+enum ZoteroAccountStatus {
+  ACTIVE
+  INACTIVE
+}
+
+model ZoteroAccount {
+  id              String               @id @default(cuid())
+  workspaceId     String
+  label           String
+  zoteroUserId    String?
+  zoteroGroupId   String?
+  apiKeyEncrypted String // 生产环境应加密存储，演示中可明文
+  status          ZoteroAccountStatus  @default(ACTIVE)
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+
+  // Relations
+  workspace   Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  zoteroItems ZoteroItem[]
+
+  @@index([workspaceId])
+}
+
+model ZoteroItem {
+  id               String    @id @default(cuid())
+  zoteroAccountId  String
+  zoteroItemKey    String
+  itemType         String
+  title            String?   @db.Text
+  creatorsJson     Json?
+  abstract         String?   @db.Text
+  tagsJson         Json?
+  collectionsJson  Json?
+  doi              String?
+  url              String?
+  hasAttachment    Boolean   @default(false)
+  rawJson          Json?
+  lastSyncedAt     DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  // Relations
+  zoteroAccount ZoteroAccount @relation(fields: [zoteroAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([zoteroAccountId, zoteroItemKey])
+  @@index([zoteroAccountId])
+  @@index([zoteroItemKey])
+}
+
+// ============================================
+// 6. Corpus & 文档 & 向量
+// ============================================
+
+enum CorpusType {
+  ACADEMIC
+  MARKET
+  MIXED
+}
+
+enum SourceType {
+  ZOTERO
+  CAPTURED
+  MANUAL
+}
+
+model Corpus {
+  id          String     @id @default(cuid())
+  workspaceId String
+  name        String
+  description String?    @db.Text
+  type        CorpusType
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  // Relations
+  workspace Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  documents CorpusDocument[]
+
+  @@index([workspaceId])
+}
+
+model CorpusDocument {
+  id          String      @id @default(cuid())
+  workspaceId String
+  corpusId    String
+  sourceType  SourceType
+  sourceRef   String? // 引用来源 ID（如 ZoteroItem.id 或 CapturedItem.id）
+  title       String
+  authors     String?
+  abstract    String?     @db.Text
+  content     String?     @db.Text
+  lang        String?
+  tags        Json?
+  publishedAt DateTime?
+  url         String?
+  metaJson    Json?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  // Relations
+  workspace Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  corpus    Corpus            @relation(fields: [corpusId], references: [id], onDelete: Cascade)
+  chunks    EmbeddingChunk[]
+
+  @@index([workspaceId])
+  @@index([corpusId])
+  @@index([sourceType])
+}
+
+// 向量 Chunk 表
+// 注意：使用 pgvector 时，可以将 embedding 字段定义为 Unsupported("vector(1536)")
+// 这里为了演示和兼容性，使用 String 存储 JSON 格式的向量
+// 实际生产环境建议直接使用 pgvector 扩展
+model EmbeddingChunk {
+  id               String   @id @default(cuid())
+  corpusDocumentId String
+  chunkIndex       Int
+  text             String   @db.Text
+  // embedding     Unsupported("vector(1536)") // 使用 pgvector 时取消注释
+  embedding        String   @db.Text // JSON 序列化的向量数组，演示用
+  createdAt        DateTime @default(now())
+
+  // Relations
+  corpusDocument CorpusDocument @relation(fields: [corpusDocumentId], references: [id], onDelete: Cascade)
+
+  @@index([corpusDocumentId])
+  @@index([chunkIndex])
+}
+
+// pgvector 使用说明：
+// 1. 在数据库中启用扩展：CREATE EXTENSION IF NOT EXISTS vector;
+// 2. 修改 embedding 字段为：embedding Unsupported("vector(1536)")
+// 3. 创建向量索引（可选，提升性能）：
+//    CREATE INDEX ON "EmbeddingChunk" USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+// 4. 查询示例（在 raw SQL 中）：
+//    SELECT * FROM "EmbeddingChunk" 
+//    ORDER BY embedding <=> '[0.1, 0.2, ...]'::vector 
+//    LIMIT 10;
+
+// ============================================
+// 7. Idea / Task / Report
+// ============================================
+
+enum IdeaSource {
+  MINIAPP
+  WEB
+  OTHER
+}
+
+model Idea {
+  id          String     @id @default(cuid())
+  workspaceId String
+  userId      String
+  content     String     @db.Text
+  source      IdeaSource
+  createdAt   DateTime   @default(now())
+
+  // Relations
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+  @@index([userId])
+  @@index([createdAt])
+}
+
+enum TaskStatus {
+  TODO
+  DOING
+  DONE
+}
+
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+model Task {
+  id          String       @id @default(cuid())
+  workspaceId String
+  title       String
+  description String?      @db.Text
+  status      TaskStatus   @default(TODO)
+  dueDate     DateTime?
+  priority    TaskPriority @default(MEDIUM)
+  createdById String
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  // Relations
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy User      @relation("TaskCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+  @@index([createdById])
+  @@index([status])
+  @@index([dueDate])
+}
+
+enum ReportType {
+  INTELLIGENCE_BRIEF
+  PRODUCT_REPORT
+  TREND_ANALYSIS
+}
+
+model Report {
+  id          String     @id @default(cuid())
+  workspaceId String
+  title       String
+  type        ReportType
+  contentMd   String     @db.Text
+  metaJson    Json?
+  createdById String
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  // Relations
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy User      @relation("ReportCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+  @@index([createdById])
+  @@index([type])
+  @@index([createdAt])
+}
